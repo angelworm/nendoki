@@ -5,14 +5,19 @@ import tweepy
 import ConfigParser
 from logging import * 
 import webbrowser
-
-# function set(i) { document.forms[4][0].value = "ねんどき公社"; document.forms[4][1].value = "nendoki+"+i+"@gmail.com"; document.forms[4][2].value = "oxbow48@click";document.forms[4].submit();};set("021")
+import mechanize
+import random
+import re
+import imaplib, email
 
 class Nendoki:
-    def __init__(self):
+    def __init__(self, setttings="settings.ini"):
+        """
+        load setting files and initialize oauth handler.
+        """
         info("reading settings.ini.")
         cp = ConfigParser.SafeConfigParser()
-        cf = os.path.join(os.path.dirname(__file__), "settings.ini")
+        cf = os.path.join(os.path.dirname(__file__), setttings)
         try:
             fp = open(cf, "r")
             cp.readfp(fp)
@@ -36,17 +41,22 @@ class Nendoki:
 
     def _bind_api(self, api):
         def _call(account_range, *args, **keywords):
+            import tweepy
             ret = []
             e = [] 
             for i in account_range:
+                
                 try:
                     ret.append(api(self.apis[i], *args, **keywords))
-                except TweepError, x:
-                    e.append(x)
-            if len(e) == 0:
+                except tweepy.TweepError as x:
+                    e.append(str(x))
+                except NameError:
+                    pass
+
+            if len(ret) != 0:
                 return ret
             else:
-                raise TweepError, e
+                raise tweepy.TweepError(str(e))
         return _call
 
     def _make_apis(self):
@@ -125,6 +135,10 @@ class Nendoki:
         #self.geo_similar_places = self._bind_api(tweepy.API.geo_similar_places)
 
     def requestAccessToken(self):
+        """
+        request user to type a pin code.
+        it gets access token and write into settings file.
+        """
         auth = tweepy.OAuthHandler(self.consumer_key, self.consumer_key_secret)
 
         info("requesting pin code.")
@@ -137,7 +151,7 @@ class Nendoki:
             fp = open("settings.ini", "a")
             fp.write("%s=%s\n" % (token.key, token.secret))
         except IOError,x:
-            critical("failed to write into settings file: %s",x)
+            critical("failed to write into settings file: %s"%x)
         finally:
             fp.close()
 
@@ -145,4 +159,95 @@ class Nendoki:
         self.apis.append(tweepy.API(auth_handler=auth))
 
         info("done")
+    
+    def getAccessToken(self, userid, passwd):
+        """
+        when you know user_id and user_password.
+        it log in, reads pin code, request access token and write into setings file.
+        """
+        br = mechanize.Browser()
+        auth = tweepy.OAuthHandler(self.consumer_key, self.consumer_key_secret)
+
+        br.set_handle_robots(False)
+
+        br.open(auth.get_authorization_url())
+        br.select_form(nr=0)
+        br.form['session[password]'] = passwd
+        br.form['session[username_or_email]'] = userid
+        br.submit()
+        body = br.response().read()
         
+        pin = re.findall(r'<code>(\d+)</code>', body, re.U)[0]
+
+        token = auth.get_access_token(verifier=pin)
+        
+        info("writing into settings file.")
+        try:
+            fp = open("settings.ini", "a")
+            fp.write("%s=%s\n" % (token.key, token.secret))
+        except IOError,x:
+            critical("failed to write into settings file: %s"%x)
+        finally:
+            fp.close()
+
+        auth.set_access_token(token.key, token.secret)
+        self.apis.append(tweepy.API(auth_handler=auth))
+
+        info("done")
+
+    def _getMailConfirmUrl(self, mailid, mailpass, sendto):
+        def getMails(mail):
+            key, res  = mail.search(None, "(TO '%s')" % sendto)
+            return res
+
+        mail = imaplib.IMAP4_SSL(host='imap.gmail.com')
+        mail.login('%s@gmail.com'%mailid, mailpass)
+        mail.select('INBOX')
+
+        mails = []
+        while True:
+            try:
+                mails = getMails(mail)
+                break
+            except:
+                print "re-getting mail"
+            
+        key, data = mail.fetch(mails[0], "(BODY[TEXT])")
+        url = re.findall("https://twitter.com/account/confirm_email/\w+/[^\"]+",email.message_from_string(data[0][1]).as_string().replace('=\r\n',''))
+
+        return url[0]
+    
+    def accountVerify(self, userid, passwd, mailid, mailpass, sendto):
+        """
+        if you create account, run this.
+        it gets access token.
+        it verify the account from your mailbox.
+        """
+        self.getAccessToken(userid, passwd)
+        print "set access token"
+        while True:
+            try:
+                url = self._getMailConfirmUrl(mailid, mailpass, sendto)
+                break
+            except:
+                print "re-getting mail"
+
+        print "get mail url"
+        
+        br = mechanize.Browser()
+        br.set_handle_robots(False)
+        br.open(url)
+        br.select_form(nr=3)
+        br.form['session[password]'] = passwd
+        br.form['session[username_or_email]'] = userid
+        br.submit()
+        body = br.response().read()
+        print "url confirmed"
+
+    def feed_watchdog(self):
+        for i in range(len(self.apis)):
+            self.update_status([i], status="%x"%random.randrange(1000000))
+
+"""
+
+"""
